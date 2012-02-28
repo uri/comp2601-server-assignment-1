@@ -2,30 +2,35 @@ package edu.carleton.COMP2601;
 
 import java.awt.HeadlessException;
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
-import java.io.OutputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.URL;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.HashMap;
 
-import javax.swing.ImageIcon;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.stream.JsonReader;
+import com.google.gson.stream.JsonWriter;
 
 public class Server implements Runnable, Reactor {
 
 	private boolean serverRunning;
 	private HashMap<String, EventHandler> handlers;
 	
-	private ObjectInputStream dis;
-	private ObjectOutputStream dos;
+	private JsonReader dis;
+	private JsonWriter dos;
+	
+	private Gson gson;
+	
+	private Socket s;
 
 	public static void main(String[] args) {
 		Server ns = new Server();
@@ -37,19 +42,13 @@ public class Server implements Runnable, Reactor {
 	public Server() {
 		serverRunning = false;
 		handlers = new HashMap<String, EventHandler>();
+		gson = new GsonBuilder().create();
 
 		// REQ_LOGIN
 		registerHandler(Message.REQ_LOGIN, new EventHandler() {
 			public void handleEvent(Event e) {
-				// Someone is trying to log into the server
-				// Send a login reply message
-				try {
-					
-					dos.writeObject(Message.jsonTypeMessage(Message.REPLY_LOGIN));
-//					dos.writeObject(new Message(Message.REPLY_LOGIN, null));
-				} catch (IOException e1) {
-					e1.printStackTrace();
-				}
+				Message reply = new Message(Message.REPLY_LOGIN);
+				sendMessage(reply);
 				
 			}
 		});
@@ -62,7 +61,6 @@ public class Server implements Runnable, Reactor {
 				
 				String directories[] = fileDirectory.list();
 				ArrayList<String> files = new ArrayList<String>();
-				HashMap<String, Object> body = new HashMap<String, Object>();
 				
 				
 				
@@ -74,22 +72,16 @@ public class Server implements Runnable, Reactor {
 					}
 					
 					// Send the message
-					
-					body.put(Message.KEY_FILE_LIST, files);
+					Message reply = new Message(Message.REPLY_LIST_FILES);
+					reply.getBody().put(Message.KEY_FILE_LIST, files);
 					
 					// TODO body puts Message.Key_Image
+					// Send the response
+					sendMessage(reply);
 					
-					try {
-						// Send the response
-						Message reply = new Message(Message.REPLY_LIST_FILES, body);
-						dos.writeObject(reply.toJSONStr());
-					} catch (IOException e1) {
-						e1.printStackTrace();
-					}
 				} else {
 					System.out.println("Error file directory not found.");
 				}
-			
 				
 			}
 		});
@@ -98,7 +90,7 @@ public class Server implements Runnable, Reactor {
 		registerHandler(Message.REQ_FILE, new EventHandler() {
 			public void handleEvent(Event e) {
 				// The user has requested the list of files...
-				String fileName = (String)e.getBody().get(Message.KEY_FILE);
+				String fileName = (String)e.getMap().get(Message.KEY_FILE);
 				String content = "";
 				
 				File file = new File("files" + File.separator + fileName);
@@ -126,19 +118,13 @@ public class Server implements Runnable, Reactor {
 				}
 				
 				// We now have the content.
-				System.out.println("This is the content of the file: " + content);
-				
+				System.out.println("This is the content of the file: "+ content);
+
 				// Send the content back
-				try {
-					HashMap<String, Object> body = new HashMap<String, Object>();
-					body.put(Message.KEY_CONTENT, content);
-					
-					Message reply = new Message(Message.REPLY_FILE, body);
-					dos.writeObject(reply.toJSONStr());
-				} catch (IOException e1) {
-					// TODO Auto-generated catch block
-					e1.printStackTrace();
-				}
+				Message reply = new Message(Message.REPLY_FILE);
+				reply.getBody().put(Message.KEY_CONTENT, content);
+
+				sendMessage(reply);
 			}
 		});
 	}
@@ -153,19 +139,15 @@ public class Server implements Runnable, Reactor {
 
 			// Listen on a port
 			listener = new ServerSocket(Common.PORT);
-			// Connect on a scket
+			// Connect on a socket
 			
 			System.out.println("Waiting for socket connection...");
-			Socket s = listener.accept();
+			s = listener.accept();
 			System.out.println("Found client.");
 
 			// Set serverRunning to true if we have connected
 			if (s.isConnected()) {
 				serverRunning = true;
-				InputStream is = s.getInputStream();
-				OutputStream os = s.getOutputStream();
-				dis = new ObjectInputStream(is);
-				dos = new ObjectOutputStream(os);
 				
 				System.out.println("Connection established.");
 			} else {
@@ -174,7 +156,7 @@ public class Server implements Runnable, Reactor {
 
 			while (serverRunning) {
 
-
+				// Running Service...
 				System.out.println("Runing Service...");
 				handleEvents();
 			}
@@ -200,34 +182,70 @@ public class Server implements Runnable, Reactor {
 	public void handleEvents()
 			throws HeadlessException {
 
-		try {
-
+		// Read
+		Message m = readMessage();
 		
-			// Read
-			Message m = new Message((String)dis.readObject());
+		System.out.println("Found message::"+m);
 
-			// Dispatch the method
-			EventHandler h = handlers.get(m.getType());
+		// Dispatch the method
+		EventHandler h = handlers.get(m.getHeader().getType());
 
-			// If we have an event handler for the message, call it
-			if (h != null) {
-				h.handleEvent(m);
-			}
-
-
-			System.out.println("Received: message" + m.getType());
-
-		} catch (UnknownHostException eh) {
-
-			System.out.println("Uknown host");
-
-		} catch (IOException eio) {
-			System.out.println("IO Exceptions");
-		} catch (ClassNotFoundException e) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
+		// If we have an event handler for the message, call it
+		if (h != null) {
+			System.out.println("Event is not null.");
+			h.handleEvent(new Event(m));
 		}
 
+	}
+	
+	
+	public void sendMessages(ArrayList<Message> messageList) {
+		
+	}
+	
+	public void sendMessage(Message m) {
+		
+		
+		
+		try {
+			OutputStreamWriter os = new OutputStreamWriter(s.getOutputStream());
+			dos = new JsonWriter(new BufferedWriter(os));
+			
+			dos.beginArray();
+			gson.toJson(m, Message.class, dos);
+			dos.endArray();
+			
+			// For the buffered reader - send what we have.
+			dos.flush();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+	}
+	
+	public void readMessages() {
+		
+	}
+	
+	
+	/** 
+	 * Read a single message
+	 */
+	public Message readMessage() {
+		Message received = null;
+		
+		try {
+			InputStreamReader is = new InputStreamReader(s.getInputStream());
+			dis = new JsonReader(new BufferedReader(is));
+			
+			dis.beginArray();
+			received = gson.fromJson(dis, Message.class);
+			dis.endArray();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+		
+		return received;
+	
 	}
 
 	/**
